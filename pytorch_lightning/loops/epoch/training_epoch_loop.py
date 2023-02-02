@@ -17,6 +17,8 @@ from typing import Any, Dict, Generator, List, Optional, overload, Tuple, Union
 
 import numpy as np
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+from datetime import datetime
 
 import pytorch_lightning as pl
 from pytorch_lightning import loops  # import as loops to avoid circular imports
@@ -160,6 +162,7 @@ class TrainingEpochLoop(loops.Loop[_OUTPUTS_TYPE]):
         Raises:
             StopIteration: When the epoch is canceled by the user returning -1
         """
+        print('train batch start:', str(datetime.now()))
         if self.restarting and self._should_check_val_fx(self.batch_idx, self.batch_progress.is_last_batch):
             # skip training and run validation in `on_advance_end`
             return
@@ -193,6 +196,7 @@ class TrainingEpochLoop(loops.Loop[_OUTPUTS_TYPE]):
             )
 
             # hook
+            print('on_train_batch_start-', batch_idx, ':', str(datetime.now()))
             self.trainer._call_callback_hooks("on_train_batch_start", batch, batch_idx, **extra_kwargs)
             response = self.trainer._call_lightning_module_hook(
                 "on_train_batch_start", batch, batch_idx, **extra_kwargs
@@ -229,6 +233,7 @@ class TrainingEpochLoop(loops.Loop[_OUTPUTS_TYPE]):
             else {}
         )
         self.trainer._call_callback_hooks("on_train_batch_end", batch_end_outputs, batch, batch_idx, **extra_kwargs)
+        print('on_train_batch_end-', batch_idx, ':', str(datetime.now()))
         self.trainer._call_lightning_module_hook(
             "on_train_batch_end", batch_end_outputs, batch, batch_idx, **extra_kwargs
         )
@@ -244,6 +249,7 @@ class TrainingEpochLoop(loops.Loop[_OUTPUTS_TYPE]):
         # SAVE METRICS TO LOGGERS AND PROGRESS_BAR
         # -----------------------------------------
         self.trainer._logger_connector.update_train_step_metrics()
+        print('train batch end-', batch_idx, ':', str(datetime.now()))
 
     def on_advance_end(self) -> None:
         # -----------------------------------------

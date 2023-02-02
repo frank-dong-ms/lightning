@@ -66,8 +66,8 @@ def test_imports_unified(pl_version: str):
         torch.load(path_ckpt)
 
     assert any(
-        key.startswith("lightning.pytorch") for key in sys.modules.keys()
+        key.startswith("lightning." + "pytorch") for key in sys.modules.keys()
     ), "Imported unified package, so it has to be in sys.modules"
     assert not any(
-        key.startswith("pytorch_" + "lightning") for key in sys.modules.keys()
+        key.startswith("pytorch_lightning") for key in sys.modules.keys()
     ), "Should not import standalone package, all imports should be redirected to the unified package"

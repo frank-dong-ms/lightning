@@ -41,15 +41,15 @@ def test_imports_standalone(pl_version: str):
 
 @pytest.mark.parametrize("pl_version", LEGACY_BACK_COMPATIBLE_PL_VERSIONS)
 @pytest.mark.skipif(
-    not package_available("lightning.pytorch"),
+    not package_available("lightning"),
     reason="This test is only relevant for the unified package",
 )
 def test_imports_unified(pl_version: str):
     assert any(
-        key.startswith("lightning.pytorch") for key in sys.modules.keys()
+        key.startswith("lightning." + "pytorch") for key in sys.modules.keys()
     ), "Imported unified package, so it has to be in sys.modules"
     assert not any(
-        key.startswith("pytorch_" + "lightning") for key in sys.modules.keys()
+        key.startswith("pytorch_lightning") for key in sys.modules.keys()
     ), "Should not import standalone package, all imports should be redirected to the unified package"
 
     path_legacy = os.path.join(LEGACY_CHECKPOINTS_PATH, pl_version)

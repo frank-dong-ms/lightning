@@ -163,92 +163,95 @@ class TrainingEpochLoop(loops.Loop[_OUTPUTS_TYPE]):
             StopIteration: When the epoch is canceled by the user returning -1
         """
         print('train batch start:', str(datetime.now()))
-        if self.restarting and self._should_check_val_fx(self.batch_idx, self.batch_progress.is_last_batch):
-            # skip training and run validation in `on_advance_end`
-            return
-        # we are going to train first so the val loop does not need to restart
-        self.val_loop.restarting = False
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+            with record_function("training_batch"):
+                if self.restarting and self._should_check_val_fx(self.batch_idx, self.batch_progress.is_last_batch):
+                    # skip training and run validation in `on_advance_end`
+                    return
+                # we are going to train first so the val loop does not need to restart
+                self.val_loop.restarting = False
 
-        if not isinstance(data_fetcher, DataLoaderIterDataFetcher):
-            batch_idx = self.batch_idx + 1
-            batch = next(data_fetcher)
-        else:
-            batch_idx, batch = next(data_fetcher)
-        self.batch_progress.is_last_batch = data_fetcher.done
+                if not isinstance(data_fetcher, DataLoaderIterDataFetcher):
+                    batch_idx = self.batch_idx + 1
+                    batch = next(data_fetcher)
+                else:
+                    batch_idx, batch = next(data_fetcher)
+                self.batch_progress.is_last_batch = data_fetcher.done
 
-        self.batch_progress.increment_ready()
+                self.batch_progress.increment_ready()
 
-        self.trainer._logger_connector.on_batch_start(batch, batch_idx)
+                self.trainer._logger_connector.on_batch_start(batch, batch_idx)
 
-        if batch is None:
-            self._warning_cache.warn("train_dataloader yielded None. If this was on purpose, ignore this warning...")
-            batch_output = []
-        else:
-            # hook
-            self.trainer._call_callback_hooks("on_batch_start")
+                if batch is None:
+                    self._warning_cache.warn("train_dataloader yielded None. If this was on purpose, ignore this warning...")
+                    batch_output = []
+                else:
+                    # hook
+                    self.trainer._call_callback_hooks("on_batch_start")
 
-            # TODO: Update this in v1.7 (deprecation: #9816)
-            model_fx = self.trainer.lightning_module.on_train_batch_start
-            extra_kwargs = (
-                {"dataloader_idx": 0}
-                if callable(model_fx) and is_param_in_hook_signature(model_fx, "dataloader_idx", explicit=True)
-                else {}
-            )
+                    # TODO: Update this in v1.7 (deprecation: #9816)
+                    model_fx = self.trainer.lightning_module.on_train_batch_start
+                    extra_kwargs = (
+                        {"dataloader_idx": 0}
+                        if callable(model_fx) and is_param_in_hook_signature(model_fx, "dataloader_idx", explicit=True)
+                        else {}
+                    )
 
-            # hook
-            print('on_train_batch_start-', batch_idx, ':', str(datetime.now()))
-            self.trainer._call_callback_hooks("on_train_batch_start", batch, batch_idx, **extra_kwargs)
-            response = self.trainer._call_lightning_module_hook(
-                "on_train_batch_start", batch, batch_idx, **extra_kwargs
-            )
-            self.trainer._call_strategy_hook("on_train_batch_start", batch, batch_idx, **extra_kwargs)
-            if response == -1:
+                    # hook
+                    print('on_train_batch_start-', batch_idx, ':', str(datetime.now()))
+                    self.trainer._call_callback_hooks("on_train_batch_start", batch, batch_idx, **extra_kwargs)
+                    response = self.trainer._call_lightning_module_hook(
+                        "on_train_batch_start", batch, batch_idx, **extra_kwargs
+                    )
+                    self.trainer._call_strategy_hook("on_train_batch_start", batch, batch_idx, **extra_kwargs)
+                    if response == -1:
+                        self.batch_progress.increment_processed()
+                        raise StopIteration
+
+                    self.batch_progress.increment_started()
+
+                    with self.trainer.profiler.profile("run_training_batch"):
+                        batch_output = self.batch_loop.run(batch, batch_idx)
+
                 self.batch_progress.increment_processed()
-                raise StopIteration
 
-            self.batch_progress.increment_started()
+                # update non-plateau LR schedulers
+                # update epoch-interval ones only when we are at the end of training epoch
+                self.update_lr_schedulers("step", update_plateau_schedulers=False)
+                if self._num_ready_batches_reached():
+                    self.update_lr_schedulers("epoch", update_plateau_schedulers=False)
 
-            with self.trainer.profiler.profile("run_training_batch"):
-                batch_output = self.batch_loop.run(batch, batch_idx)
+                batch_end_outputs = self._prepare_outputs_training_batch_end(
+                    batch_output,
+                    lightning_module=self.trainer.lightning_module,
+                    num_optimizers=len(self.trainer.optimizers),
+                )
 
-        self.batch_progress.increment_processed()
+                # TODO: Update this in v1.7 (deprecation: #9816)
+                model_fx = self.trainer.lightning_module.on_train_batch_end
+                extra_kwargs = (
+                    {"dataloader_idx": 0}
+                    if callable(model_fx) and is_param_in_hook_signature(model_fx, "dataloader_idx", explicit=True)
+                    else {}
+                )
+                self.trainer._call_callback_hooks("on_train_batch_end", batch_end_outputs, batch, batch_idx, **extra_kwargs)
+                print('on_train_batch_end-', batch_idx, ':', str(datetime.now()))
+                self.trainer._call_lightning_module_hook(
+                    "on_train_batch_end", batch_end_outputs, batch, batch_idx, **extra_kwargs
+                )
+                self.trainer._call_callback_hooks("on_batch_end")
+                self.trainer._logger_connector.on_batch_end()
 
-        # update non-plateau LR schedulers
-        # update epoch-interval ones only when we are at the end of training epoch
-        self.update_lr_schedulers("step", update_plateau_schedulers=False)
-        if self._num_ready_batches_reached():
-            self.update_lr_schedulers("epoch", update_plateau_schedulers=False)
+                self.batch_progress.increment_completed()
 
-        batch_end_outputs = self._prepare_outputs_training_batch_end(
-            batch_output,
-            lightning_module=self.trainer.lightning_module,
-            num_optimizers=len(self.trainer.optimizers),
-        )
+                if is_overridden("training_epoch_end", self.trainer.lightning_module):
+                    self._outputs.append(batch_output)
 
-        # TODO: Update this in v1.7 (deprecation: #9816)
-        model_fx = self.trainer.lightning_module.on_train_batch_end
-        extra_kwargs = (
-            {"dataloader_idx": 0}
-            if callable(model_fx) and is_param_in_hook_signature(model_fx, "dataloader_idx", explicit=True)
-            else {}
-        )
-        self.trainer._call_callback_hooks("on_train_batch_end", batch_end_outputs, batch, batch_idx, **extra_kwargs)
-        print('on_train_batch_end-', batch_idx, ':', str(datetime.now()))
-        self.trainer._call_lightning_module_hook(
-            "on_train_batch_end", batch_end_outputs, batch, batch_idx, **extra_kwargs
-        )
-        self.trainer._call_callback_hooks("on_batch_end")
-        self.trainer._logger_connector.on_batch_end()
-
-        self.batch_progress.increment_completed()
-
-        if is_overridden("training_epoch_end", self.trainer.lightning_module):
-            self._outputs.append(batch_output)
-
-        # -----------------------------------------
-        # SAVE METRICS TO LOGGERS AND PROGRESS_BAR
-        # -----------------------------------------
-        self.trainer._logger_connector.update_train_step_metrics()
+                # -----------------------------------------
+                # SAVE METRICS TO LOGGERS AND PROGRESS_BAR
+                # -----------------------------------------
+                self.trainer._logger_connector.update_train_step_metrics()
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))   
         print('train batch end-', batch_idx, ':', str(datetime.now()))
 
     def on_advance_end(self) -> None:
